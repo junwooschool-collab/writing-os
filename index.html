@@ -90,6 +90,17 @@
   .foot .dot{display:inline-block; width:7px; height:7px; border-radius:99px; background:#555; vertical-align:middle; margin-right:4px;}
   .foot .dot.on{background:var(--green);} .foot .dot.err{background:var(--red);} .foot .dot.busy{background:var(--amber);}
   #syncBtn{margin-top:9px; font-size:12px; padding:7px 13px;}
+  /* 문구 수정기 */
+  #editToggle{margin-top:9px; margin-left:6px; font-size:12px; padding:7px 13px;}
+  #msgEditor{background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px; margin-top:12px; text-align:left;}
+  #msgEditor .row{margin-bottom:12px;}
+  #msgEditor label{display:block; font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px;}
+  #msgEditor label .sw{display:inline-block; width:9px; height:9px; border-radius:99px; vertical-align:middle; margin-right:5px;}
+  #msgEditor textarea{width:100%; min-height:58px; resize:vertical; background:var(--panel2); border:1px solid var(--line);
+    color:var(--text); border-radius:12px; padding:10px 12px; font-family:inherit; font-size:15px; line-height:1.45;}
+  #msgEditor .note{font-size:11px; color:var(--muted); margin:2px 0 12px; line-height:1.6;}
+  #msgEditor .ed-btns{display:flex; gap:8px; flex-wrap:wrap;}
+  #msgEditor .ed-btns .save{background:var(--green); color:#03210a; border-color:transparent;}
   .hint{font-size:11px; color:var(--muted); text-align:center; margin-top:10px;}
 </style>
 </head>
@@ -131,12 +142,33 @@
       <span class="sun">일</span><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span class="sat">토</span>
     </div>
     <div class="grid" id="grid"></div>
-    <div class="hint">지난 날짜 칸을 누르면 0 → 2,500 → 5,000 순환 (과거 보정)</div>
+    <div class="hint">지난 날짜 칸을 누르면 0 ↔ 5,000 전환 (과거 보정)</div>
   </div>
 
   <div class="foot">
     <div><span class="dot" id="syncDot"></span><span id="syncMsg">이 기기에 저장 중</span></div>
     <button id="syncBtn" style="display:none;" onclick="syncNow()">지금 동기화</button>
+    <button id="editToggle" onclick="toggleEditor()">✏️ 문구 수정</button>
+    <div id="msgEditor" style="display:none;">
+      <div class="row">
+        <label><span class="sw" style="background:var(--red)"></span>0자일 때 (빨강)</label>
+        <textarea id="edZero" placeholder="아직 0자다.&#10;자기 전까지 5,000자를 써라."></textarea>
+      </div>
+      <div class="row">
+        <label><span class="sw" style="background:var(--amber)"></span>채우는 중 (주황)</label>
+        <textarea id="edPart" placeholder="{n}자 썼다.&#10;{남은}자 남았다. 멈추지 마라."></textarea>
+      </div>
+      <div class="row">
+        <label><span class="sw" style="background:var(--green)"></span>완료 (초록)</label>
+        <textarea id="edDone" placeholder="오늘 {n}자.&#10;채웠다. 오늘은 살아있다."></textarea>
+      </div>
+      <div class="note">줄바꿈 가능 · <b>{n}</b>=오늘 글자수, <b>{남은}</b>=남은 글자수 · 비워두면 기본 문구</div>
+      <div class="ed-btns">
+        <button class="save" onclick="saveMsgs()">저장</button>
+        <button onclick="resetMsgs()">기본값</button>
+        <button onclick="toggleEditor()">닫기</button>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -196,9 +228,7 @@ document.getElementById('todayInput').addEventListener('change', function(){
 function moveMonth(delta){ view.setMonth(view.getMonth()+delta); render(); }
 
 function cycleDay(k){
-  var n = get(k);
-  var next = n===0 ? 2500 : (n<5000 ? 5000 : 0);
-  set(k, next);
+  set(k, get(k) >= GOAL ? 0 : GOAL);   // 0 ↔ 5,000 (주황 단계 없음)
 }
 
 /* ===================== 통계 ===================== */
@@ -220,6 +250,45 @@ function stats(){
   return { days:days, total:total, month:month, streak:currentStreak() };
 }
 
+/* ===================== 판결문 문구 (수정 가능) ===================== */
+var DEFAULT_MSGS = {
+  zero: '아직 0자다.\n자기 전까지 5,000자를 써라.',
+  part: '{n}자 썼다.\n{남은}자 남았다. 멈추지 마라.',
+  done: '오늘 {n}자.\n채웠다. 오늘은 살아있다.'
+};
+function msgFor(kind, n){
+  var t = (state.msgs && state.msgs[kind]) ? state.msgs[kind] : DEFAULT_MSGS[kind];
+  return t.replace(/\{n\}/g, n.toLocaleString())
+          .replace(/\{남은\}/g, Math.max(0, GOAL-n).toLocaleString());
+}
+function toggleEditor(){
+  var e = document.getElementById('msgEditor');
+  var open = (e.style.display === 'none' || !e.style.display);
+  if(open){
+    document.getElementById('edZero').value = (state.msgs && state.msgs.zero) || '';
+    document.getElementById('edPart').value = (state.msgs && state.msgs.part) || '';
+    document.getElementById('edDone').value = (state.msgs && state.msgs.done) || '';
+  }
+  e.style.display = open ? 'block' : 'none';
+}
+function saveMsgs(){
+  var m = {
+    zero: document.getElementById('edZero').value.trim(),
+    part: document.getElementById('edPart').value.trim(),
+    done: document.getElementById('edDone').value.trim()
+  };
+  var out = {};
+  for(var k in m){ if(m[k]) out[k] = m[k]; }   // 빈 값은 기본 문구로
+  state.msgs = out;
+  state.msgsT = Date.now();
+  save(); render(); toggleEditor();
+}
+function resetMsgs(){
+  document.getElementById('edZero').value = '';
+  document.getElementById('edPart').value = '';
+  document.getElementById('edDone').value = '';
+}
+
 /* ===================== 렌더 ===================== */
 function render(){
   var tk = todayKey(), tn = get(tk);
@@ -229,13 +298,7 @@ function render(){
   var vt = document.getElementById('verdictText');
   var vb = document.getElementById('verdictBar');
   v.className = 'verdict ' + (tn>=GOAL ? 'green' : tn>0 ? 'amber' : 'red');
-  if(tn>=GOAL){
-    vt.textContent = '오늘 '+tn.toLocaleString()+'자.\n채웠다. 오늘은 살아있다.';
-  }else if(tn>0){
-    vt.textContent = tn.toLocaleString()+'자 썼다.\n'+(GOAL-tn).toLocaleString()+'자 남았다. 멈추지 마라.';
-  }else{
-    vt.textContent = '아직 0자다.\n자기 전까지 5,000자를 써라.';
-  }
+  vt.textContent = msgFor(tn>=GOAL ? 'done' : tn>0 ? 'part' : 'zero', tn);
   vb.style.width = Math.min(100, tn/GOAL*100) + '%';
 
   var inp = document.getElementById('todayInput');
@@ -321,9 +384,10 @@ function syncNow(){
   fetch(SYNC_URL, {cache:'no-store'})
     .then(function(r){ return r.text(); })
     .then(function(txt){
-      var remote = {};
-      try{ var p = JSON.parse(txt); remote = (p && p.log) ? p.log : {}; }catch(e){}
-      state.log = mergeLogs(state.log, remote);
+      var p = {};
+      try{ p = JSON.parse(txt) || {}; }catch(e){}
+      state.log = mergeLogs(state.log, p.log || {});
+      if(p.msgs && (p.msgsT||0) > (state.msgsT||0)){ state.msgs = p.msgs; state.msgsT = p.msgsT; }  // 문구도 기기간 병합
       state.updatedAt = Date.now();
       persist(); render();
       return fetch(SYNC_URL, { method:'POST', body: JSON.stringify(state) }); // 본문은 text/plain → CORS 사전요청 회피
