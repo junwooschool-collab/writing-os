@@ -88,7 +88,8 @@
 
   .foot{margin-top:14px; text-align:center; font-size:11px; color:var(--muted); line-height:1.7;}
   .foot .dot{display:inline-block; width:7px; height:7px; border-radius:99px; background:#555; vertical-align:middle; margin-right:4px;}
-  .foot .dot.on{background:var(--green);} .foot .dot.err{background:var(--red);}
+  .foot .dot.on{background:var(--green);} .foot .dot.err{background:var(--red);} .foot .dot.busy{background:var(--amber);}
+  #syncBtn{margin-top:9px; font-size:12px; padding:7px 13px;}
   .hint{font-size:11px; color:var(--muted); text-align:center; margin-top:10px;}
 </style>
 </head>
@@ -134,7 +135,8 @@
   </div>
 
   <div class="foot">
-    <div><span class="dot" id="syncDot"></span><span id="syncMsg">이 기기에 영구 저장 중 · 셋업 0</span></div>
+    <div><span class="dot" id="syncDot"></span><span id="syncMsg">이 기기에 저장 중</span></div>
+    <button id="syncBtn" style="display:none;" onclick="syncNow()">지금 동기화</button>
   </div>
 
 </div>
@@ -144,31 +146,42 @@
 var GOAL = 5000;
 var STORE = 'writingOS.v1';
 
-// 구글 시트 연동 슬롯 (비워두면 이 기기 로컬만 사용 — 권장)
+// 구글 시트 연동 슬롯 — 여기에 Apps Script 웹앱 URL을 넣으면 모든 기기가 같은 데이터를 공유한다.
+// 비워두면 이 기기에만 저장(기기간 연동 없음).
 var SYNC_URL = '';
 /* =============================================== */
 
-var state = load();          // { log:{ '2026-06-23': 5000, ... }, updatedAt:0 }
+// 저장 구조: log[날짜] = { n: 글자수, t: 마지막수정시각 }  (t로 기기간 병합 충돌 해결)
+var state = load();
 var view  = new Date();      // 보고 있는 달
 view.setDate(1);
 
+function migrate(s){
+  if(!s || !s.log) return { log:{}, updatedAt:0 };
+  for(var k in s.log){ if(typeof s.log[k] === 'number'){ s.log[k] = { n:s.log[k], t:0 }; } }
+  if(!s.updatedAt) s.updatedAt = 0;
+  return s;
+}
 function load(){
-  try{ var s = JSON.parse(localStorage.getItem(STORE)); if(s && s.log) return s; }catch(e){}
+  try{ var s = JSON.parse(localStorage.getItem(STORE)); if(s && s.log) return migrate(s); }catch(e){}
   return { log:{}, updatedAt:0 };
+}
+function persist(){
+  try{ localStorage.setItem(STORE, JSON.stringify(state)); }catch(e){}
 }
 function save(){
   state.updatedAt = Date.now();
-  try{ localStorage.setItem(STORE, JSON.stringify(state)); }catch(e){}
-  pushSync();
+  persist();
+  scheduleSync();
 }
 function key(d){
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 }
 function todayKey(){ return key(new Date()); }
-function get(k){ return state.log[k] || 0; }
+function get(k){ var e = state.log[k]; return e ? e.n : 0; }
 function set(k, n){
   n = Math.max(0, Math.round(n));
-  if(n===0) delete state.log[k]; else state.log[k] = n;
+  state.log[k] = { n:n, t:Date.now() };   // 0도 기록(기기간 초기화 전파용)
   save(); render();
 }
 
@@ -200,7 +213,7 @@ function stats(){
   var days=0, total=0, month=0;
   var ym = view.getFullYear()+'-'+String(view.getMonth()+1).padStart(2,'0');
   for(var k in state.log){
-    var v = state.log[k];
+    var v = state.log[k].n;
     total += v;
     if(v>=GOAL){ days++; if(k.indexOf(ym)===0) month++; }
   }
@@ -277,37 +290,63 @@ function render(){
   }
 }
 
-/* ===================== 구글 시트 연동 (선택) ===================== */
+/* ===================== 기기간 연동 (읽기→병합→쓰기) ===================== */
 function setSyncUI(cls, msg){
   document.getElementById('syncDot').className = 'dot '+cls;
   document.getElementById('syncMsg').textContent = msg;
 }
-var pushTimer=null;
-function pushSync(){
+function hhmm(){ return new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'}); }
+
+// 두 로그를 날짜별로 병합: 같은 날짜는 t(수정시각)가 더 최근인 쪽이 이김
+function mergeLogs(a, b){
+  var out = {}, k;
+  for(k in a) out[k] = a[k];
+  for(k in b){
+    if(typeof b[k] === 'number') b[k] = { n:b[k], t:0 };
+    if(!out[k] || (b[k].t||0) > (out[k].t||0)) out[k] = b[k];
+  }
+  return out;
+}
+
+var pushTimer=null, syncing=false, syncAgain=false;
+function scheduleSync(){
   if(!SYNC_URL) return;
   clearTimeout(pushTimer);
-  pushTimer = setTimeout(function(){
-    fetch(SYNC_URL, {method:'POST', body:JSON.stringify(state)})
-      .then(function(){ setSyncUI('on','시트 동기화됨 · '+new Date().toLocaleTimeString()); })
-      .catch(function(){ setSyncUI('err','동기화 실패 (로컬은 안전)'); });
-  }, 800);
+  pushTimer = setTimeout(syncNow, 700);
 }
-function pullSync(){
-  if(!SYNC_URL){ setSyncUI('','이 기기에 영구 저장 중 · 셋업 0'); return; }
-  setSyncUI('','시트에서 불러오는 중…');
-  fetch(SYNC_URL).then(function(r){return r.json();}).then(function(remote){
-    if(remote && remote.log && (remote.updatedAt||0) > (state.updatedAt||0)){
-      state = remote;
-      localStorage.setItem(STORE, JSON.stringify(state));
-    }
-    setSyncUI('on','시트 연동됨');
-    render();
-  }).catch(function(){ setSyncUI('err','시트 불러오기 실패 (로컬 사용)'); });
+function syncNow(){
+  if(!SYNC_URL){ setSyncUI('', '이 기기에 저장 중 (연동 꺼짐)'); return; }
+  if(syncing){ syncAgain = true; return; }
+  syncing = true; setSyncUI('busy','동기화 중…');
+  fetch(SYNC_URL, {cache:'no-store'})
+    .then(function(r){ return r.text(); })
+    .then(function(txt){
+      var remote = {};
+      try{ var p = JSON.parse(txt); remote = (p && p.log) ? p.log : {}; }catch(e){}
+      state.log = mergeLogs(state.log, remote);
+      state.updatedAt = Date.now();
+      persist(); render();
+      return fetch(SYNC_URL, { method:'POST', body: JSON.stringify(state) }); // 본문은 text/plain → CORS 사전요청 회피
+    })
+    .then(function(){ setSyncUI('on','모든 기기 동기화됨 · '+hhmm()); })
+    .catch(function(){ setSyncUI('err','동기화 실패 — 로컬은 안전, 자동 재시도'); })
+    .then(function(){
+      syncing = false;
+      if(syncAgain){ syncAgain = false; setTimeout(syncNow, 400); }
+    });
 }
 
 /* ===================== 시작 ===================== */
 render();
-pullSync();
+if(SYNC_URL){
+  document.getElementById('syncBtn').style.display = 'inline-block';
+  syncNow();
+  setInterval(syncNow, 45*1000);                 // 주기 병합
+  document.addEventListener('visibilitychange', function(){ if(!document.hidden) syncNow(); });
+  window.addEventListener('online', syncNow);
+}else{
+  setSyncUI('', '이 기기에 저장 중 (연동 꺼짐)');
+}
 // 자정 넘어가면 '오늘'이 바뀌므로 주기적으로 새로고침
 setInterval(function(){ render(); }, 60*1000);
 </script>
